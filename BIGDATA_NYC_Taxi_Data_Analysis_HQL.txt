@@ -1,0 +1,349 @@
+-- IMPORTANT: BEFORE CREATING ANY TABLE, MAKE SURE YOU RUN THIS COMMAND 
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+drop table arpan_ny_taxi;
+
+-- CREATE EXTERNAL TABLE 
+create external table if not exists arpan_ny_taxi(VendorID int, tpep_pickup_datetime timestamp,tpep_dropoff_datetime timestamp,
+Passenger_count int, Trip_distance double,RateCodeID int,Store_and_fwd_flag string, PULocationID int, DOLocationID int,
+Payment_type int,Fare_amount double, Extra double, MTA_tax double, Tip_amount double,Tolls_amount double,Improvement_surcharge double,
+Total_amount double) 
+row format delimited fields terminated by ','
+location '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+select count(*) from arpan_ny_taxi;
+
+-- Null check for each column 
+select count(*) from arpan_ny_taxi where VendorID is NULL;
+select count(*) from arpan_ny_taxi where  tpep_pickup_datetime is NULL;
+select count(*) from arpan_ny_taxi where  tpep_dropoff_datetime is NULL;
+select count(*) from arpan_ny_taxi where  Passenger_count is NULL;
+select count(*) from arpan_ny_taxi where  Trip_distance is NULL;
+select count(*) from arpan_ny_taxi where  tRateCodeID is NULL;
+select count(*) from arpan_ny_taxi where  Store_and_fwd_flag is NULL;
+select count(*) from arpan_ny_taxi where  tPULocationID is NULL;
+select count(*) from arpan_ny_taxi where  DOLocationID is NULL;
+select count(*) from arpan_ny_taxi where  Payment_type  is NULL;
+select count(*) from arpan_ny_taxi where  Fare_amount is NULL;
+select count(*) from arpan_ny_taxi where  Extra is NULL;
+select count(*) from arpan_ny_taxi where  MTA_tax is NULL;
+select count(*) from arpan_ny_taxi where  Improvement_surcharge is NULL;
+select count(*) from arpan_ny_taxi where  Tip_amount is NULL;
+select count(*) from arpan_ny_taxi where  Tolls_amount is NULL;
+select count(*) from arpan_ny_taxi where  Total_amount is NULL;
+
+-- no null value found
+
+--How many records has each TPEP provider provided? Write a query that summarises the number of records of each provider.
+select count(*) from arpan_ny_taxi;
+--total number of record found 1174569
+select count(*) from arpan_ny_taxi group by VendorID;
+-- Provider 1 - 647183
+-- Provider 2 - 527386
+select concat(year(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime))),month(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime)))) as yr_month, count(*) as no_of_rec
+from arpan_ny_taxi
+group by concat(year(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime))),month(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime))));
+--yr_month no_of_rec
+--1	20031	1
+--2	20091	1
+--3	201711	580300
+--4	20181	4
+--5	200812	2
+--6	201710	6
+--7	201712	594255
+--Issue 1 - There are few rows present from years and months other than 2017 november and december. This rows neeeds to be romoved during analysis. 
+--No of records in NOV17 and DEC17 are comparable - Data is consistent here.
+select concat(year(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime))),month(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime)))) as yr_month, count(*) as no_of_rec
+from arpan_ny_taxi
+group by concat(year(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime))),month(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime))));
+ 	no_of_rec
+--1	20031	1 
+--2	20091	2
+--3	201711	580053
+--4	20181	110
+--5	20194	1
+--6	200812	1
+--7	201710	2
+--8	201712	594399
+-- Issue 2 - rows for which either of trip distance , passanger count less than or equa to zero 
+select count(*) as trip_count, payment_type from arpan_ny_taxi  where Trip_distance <= 0 or Passenger_count <= 0 group by payment_type;
+--  	trip_count 	payment_type
+--	    5401	    2
+--	    204	        4
+--	    7422	    1
+--	    1089	    3
+-- this payment types are valid and non disputed but passanger count and passenger count should be more than zero. 
+-- 14116 rows found. This is a data issue and needs to be omitted in final analysis.
+-- Issue 3 - rows where total amount or fare amount is less than or equal zero
+select count(*) from arpan_ny_taxi where Fare_amount < 0 or Total_amount < 0;
+-- 558 rows found and this is a data issue.
+select count(*) as row_count,payment_type from arpan_ny_taxi where Fare_amount = 0 or Total_amount = 0 group by payment_type;
+--row_count 	payment_type
+--139	        2
+--10	        4
+--75	        1
+--88	        3
+-- Payment type 3 & 4 with zero charge may be possible but 1 & 2 having zero is a problem.This seems to be an data issue and should be removed 
+select count(*)  from arpan_ny_taxi where (Fare_amount = 0 or Total_amount = 0) and (payment_type = 1 or payment_type =2);
+-- this 214 rows needs to be removed
+-- Issue 4 - rows where other amounts are less than zero. 
+select count(*) from arpan_ny_taxi where Extra < 0 or MTA_tax < 0 or Improvement_surcharge < 0 or Tip_amount < 0 or Tolls_amount < 0;
+-- 559 such rows found and these is severe issue.
+select distinct(RateCodeID) from arpan_ny_taxi;
+-- Issue 5 - According to data dictonary there are 6 possible rate type. But in data there are rows with ratetype '99' this must be a data issue
+select distinct(Passenger_count) from arpan_ny_taxi;
+-- Other than 0 passanger count varies from 1 to 9. This looks good.
+-- Issue 6 - Check if there are rows present for which pick up time if greater than or equal to drop time 
+select count(*) as row_count, payment_type from arpan_ny_taxi where tpep_pickup_datetime >= tpep_dropoff_datetime group by payment_type;
+--row_count 	payment_type
+--3040	        2
+--125	        4
+--2491	        1
+--899	        3
+-- There are 6555 rows present. This must be data issue. 
+
+-- Summarise your conclusions based on every column where these errors are present
+-- Please find below the summary on Vendor level for providing incorrect data 
+-- Issue 2 - rows for which either of trip distance , passanger count less than or equa to zero 
+select count(*) as error_cnt, vendorid from arpan_ny_taxi where Trip_distance <= 0 or Passenger_count <= 0 group by vendorid;
+error_cnt 	vendorid
+--  error_cnt 	vendorid
+--	10927	1
+--	3189	2
+-- Issue 3 - rows where total amount or fare amount is less than or equal zero
+select count(*) as error_cnt, vendorid from arpan_ny_taxi  where Fare_amount <= 0 or Total_amount <= 0 group by vendorid;
+--  	error_cnt 	vendorid
+--	    639	2
+--	    231	1
+-- Issue 4 - rows where other amounts are less than zero. 
+select count(*) as error_cnt, vendorid from arpan_ny_taxi where Extra < 0 or MTA_tax < 0 or Improvement_surcharge < 0 or Tip_amount < 0 or Tolls_amount < 0 group by vendorid;
+--  	error_cnt 	vendorid
+--	558	2
+--	1	1
+-- Issue 5 - According to data dictonary there are 6 possible rate type. But in data there are rows with ratetype '99' this must be a data issue
+select count(*) as error_cnt, vendorid from arpan_ny_taxi where RateCodeID = 99 group by vendorid;
+--error_cnt 	vendorid
+--	1	2
+--	8	1
+-- Issue 6 - Check if there are rows present for which pick up time if greater than or equal to drop time 
+select count(*) as error_cnt, vendorid from arpan_ny_taxi where tpep_pickup_datetime >= tpep_dropoff_datetime group by vendorid;
+--error_cnt 	vendorid
+--3063	2
+--3492	1
+-- From above analysis it is clear that vendor 1 has provided more erroneous data than vendor 2.
+-- Sum of erreneous data by vendor
+select count(*) as error_cnt, vendorid from arpan_ny_taxi where Trip_distance <= 0 or Passenger_count <= 0 or tpep_pickup_datetime >= tpep_dropoff_datetime
+or RateCodeID = 99 or Extra < 0 or MTA_tax < 0 or Improvement_surcharge < 0 or Tip_amount < 0 or Tolls_amount < 0 or  
+Fare_amount < 0 or Total_amount < 0 or ((Fare_amount = 0 or Total_amount = 0) and (payment_type = 1 or payment_type =2)) group by vendorid;
+--error_cnt 	vendorid
+--  	11916	1
+--  	4624	2
+select count(*) as no_of_trips, payment_type from arpan_ny_taxi group by payment_type;
+select count(*) as no_of_row,RateCodeID from arpan_ny_taxi group by RateCodeID;
+-- there are many 10 types of passanger count. We will split ta data based on this.
+
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+-- First drop the table 
+drop table arpan_ny_taxi_part;
+
+-- Then create external table 
+create external table if not exists arpan_ny_taxi_part(VendorID int, tpep_pickup_datetime timestamp,tpep_dropoff_datetime timestamp,
+passenger_count int,Trip_distance double,Store_and_fwd_flag string, PULocationID int, DOLocationID int,
+Payment_type int,Fare_amount double, Extra double, MTA_tax double,Tip_amount double,Tolls_amount double,Improvement_surcharge double,
+Total_amount double,dropyymm int, pickyymm int) partitioned by (RateID int)
+location '/user/hive/warehouse/a';
+--Insert rows.
+insert overwrite table arpan_ny_taxi_part partition(RateID)
+select VendorID, tpep_pickup_datetime ,tpep_dropoff_datetime,
+Passenger_count, Trip_distance,Store_and_fwd_flag, PULocationID, DOLocationID,
+Payment_type,Fare_amount, Extra, MTA_tax,Tip_amount,Tolls_amount,Improvement_surcharge,
+Total_amount,concat(year(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime))),month(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime)))) as dropyymm,
+concat(year(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime))),month(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime)))) as pickyymm,
+RateCodeID as RateID from arpan_ny_taxi;
+
+--Validate count 
+select count(*) from arpan_ny_taxi_part;
+drop table arpan_ny_taxi_part_orc;
+--create ORC table 
+create external table if not exists arpan_ny_taxi_part_orc(VendorID int, tpep_pickup_datetime timestamp,tpep_dropoff_datetime timestamp,
+passenger_count int,Trip_distance double,Store_and_fwd_flag string, PULocationID int, DOLocationID int,
+Payment_type int,Fare_amount double, Extra double, MTA_tax double,Tip_amount double,Tolls_amount double,Improvement_surcharge double,
+Total_amount double,dropyymm int, pickyymm int) partitioned by (RateID int)
+stored as orc location '/user/hive/warehouse/a'
+tblproperties ("orc.compress"="SNAPPY");
+
+--Load data into ORC table ignoring error rows
+
+insert overwrite table arpan_ny_taxi_part_orc partition(RateID)
+select * from arpan_ny_taxi_part where Trip_distance > 0
+and Passenger_count > 0 and tpep_pickup_datetime < tpep_dropoff_datetime
+ and Extra >= 0 and MTA_tax >= 0 and Improvement_surcharge >= 0 and Tip_amount >= 0 and Tolls_amount >= 0 and  
+Fare_amount > 0 and Total_amount > 0  and (rateid = 1 or rateid = 2 or rateid = 3 or rateid = 4 or rateid = 5 or rateid = 6) and
+((concat(year(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime))) ,month(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime)))) = 201711)
+or (concat(year(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime))) ,month(FROM_UNIXTIME(unix_timestamp(tpep_dropoff_datetime)))) = 201712)) and 
+((concat(year(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime))) ,month(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime)))) = 201711)
+or (concat(year(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime))) ,month(FROM_UNIXTIME(unix_timestamp(tpep_pickup_datetime)))) = 201712));
+select count(*) from arpan_ny_taxi_part_orc;
+-- original file row count 1174569
+-- after error removal row count 1157844
+
+---final cleaned table is table arpan_ny_taxi_part_orc this will be used for further analysis
+
+-----Analysis starts here  =  analysis 1 
+
+--1.Compare the overall average fare per trip for November and December
+select avg(Fare_amount) as avg_fare , avg(Total_amount) as avg_total, pickyymm as pickup_yyyymm from arpan_ny_taxi_part_orc group by pickyymm;
+--  	avg_fare 	    avg_total 	        pickup_yyyymm - By pick up date 
+--2	12.84183060930382	16.090718464138085	201712
+--1	13.051877464207818	16.3929603523995	201711
+select avg(Fare_amount) as avg_fare , avg(Total_amount) as avg_total, dropyymm as drop_yyyymm from arpan_ny_taxi_part_orc group by dropyymm;
+--  	avg_fare 	    avg_total 	        drop_yyyymm
+--1	13.048986383234665	16.38948246493558	201711
+--2	12.844742431328106	16.094242450033605	201712
+-- Based on pickup and drop date the avg fare is same so the data is consistent.
+
+--2. Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? Do most people travel solo or with other people?
+select count(*) as no_of_trips, passenger_count from arpan_ny_taxi_part_orc group by passenger_count order by no_of_trips;
+--  	no_of_trips 	passenger_count
+--1	    3	            7
+--2	    24787	        4
+--3	    32994	        6
+--4	    50400	        3
+--5	    54256	        5
+--6	    175629	        2
+--7	    819775	        1
+
+-- More trips are with passenger count 1. So poeple prefer solo trips more.
+
+--3.  Which is the most preferred mode of payment?
+select count(*) as no_of_trips, Payment_type from arpan_ny_taxi_part_orc group by Payment_type order by no_of_trips;
+no_of_trips 	payment_type
+--  no_of_trips 	payment_type
+--1	1309	        4
+--2	4524	        3
+--3	369945	        2
+--4	782066	        1
+-- Most poepoe prefer payment method 1 i.e. credit card
+
+-- What is the average tip paid per trip? 
+Select avg(tip_amount) from arpan_ny_taxi_part_orc;
+--	1.8473
+
+--4. Compare the average tip with the 25th, 50th and 75th percentiles and comment whether 
+-- the ‘average tip’ is a representative statistic (of the central tendency) of ‘tip amount paid’
+select 	percentile_approx(tip_amount,0.25) as 25th_pct,percentile_approx(tip_amount,0.50) as 50th_pct,
+percentile_approx(tip_amount,0.75) as 75th_pct from arpan_ny_taxi_part_orc;
+--  	25th_pct 	50th_pct 	75th_pct
+--  	0	        1.355	        2.4500   
+--  ‘average tip’ is near about the 50th pct. But there are outliers in data. Extream outliers removed. 
+--  This is the reason 
+
+--5.  Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+select count(*)/1157844*100 from arpan_ny_taxi_part_orc where extra > 0;
+--charge levied on 536698 trips out of 1157844 = 46% trip has extra amount 
+--percent is 46.34
+------------------------------------------------------------------------------------------------------------------
+-----Analysis starts here  =  analysis 2
+
+--1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip? 
+select corr(passenger_count,tip_amount) from arpan_ny_taxi_part_orc;
+-- corelation is -0.004912635632492414
+-- this has a negetive corelation which means no of traveller increase tip decrease. But the change will be negligible.
+select avg(tip_amount), passenger_count from  arpan_ny_taxi_part_orc group by passenger_count;
+--  avg_tip_amt         passenger_count
+--1 .856158336128744	1
+--2	1.8526527509694033	2
+--3	1.7646329365079747	3
+--4	1.6201319239924186	4
+--5	1.883962326747349	5
+--6	1.8385260956537754	6
+--7	5.2299999999999995	7
+
+-- -- Do multiple travellers tip more compared to solo travellers? 
+-- From corelation it should be no. The more no of passengers less the tip.
+-- To get more insight lets check other figure. 
+select count(*) as trip_cnt, passenger_count from  arpan_ny_taxi_part_orc where tip_amount > 0 group by passenger_count;
+--  trip_cnt 	passenger_count
+--1	538557	    1
+--2	110621	    2
+--3	30831	    3
+--4	13692	    4
+--5	34746	    5
+--6	21061	    6
+--7	2	        7
+-- No of trips in which tip is paid is much higher for solo traveler than group treveller. 
+-- But average is less for solo because there are more solo trip in numeber than 
+select corr(passenger_count,tip_amount) from arpan_ny_taxi_part_orc where passenger_count > 1;
+-- corelation is negetive 	-0.0018147908715173363.
+-- this justifies the data. Mor the tip amount.
+
+--2. Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. 
+-- Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+drop table arpan_ny_taxi_bucket;
+create external table if not exists arpan_ny_taxi_bucket(VendorID int, tip_amount double)
+partitioned by (tip_amount_bucket int)
+stored as orc location '/user/hive/warehouse/a'
+tblproperties ("orc.compress"="SNAPPY");
+
+
+insert overwrite table arpan_ny_taxi_bucket partition(tip_amount_bucket)
+Select vendorid,tip_amount,CASE WHEN (tip_amount >= 0 and tip_amount <5) THEN 1  
+        WHEN (tip_amount >= 5 and tip_amount < 10) THEN 2
+        WHEN (tip_amount >= 10 and tip_amount < 15) THEN 3
+        WHEN (tip_amount >= 15 and tip_amount < 20) THEN 4
+        WHEN (tip_amount >= 20) THEN 5 END tip_paid from arpan_ny_taxi_part_orc;
+-- Bucket table is created 
+select count(*) from arpan_ny_taxi_bucket;
+-- no of rows are same as source table 1157844
+select count(*) as no_of_trip,tip_amount_bucket  from arpan_ny_taxi_bucket group by tip_amount_bucket;
+--  no_of_trip 	tip_amount_bucket
+--	1067491	    1
+--2	65501	    2
+--3	21219	    3
+--4	2591	    4
+--5	1042	    5
+select count(*)/1157844*100
+as pct, tip_amount_bucket from arpan_ny_taxi_bucket group by tip_amount_bucket;
+--  pct 	                tip_amount_bucket
+--92.1964444260194	        1
+--2	5.657152431588366	    2
+--3	1.832630302527802	    3
+--4	0.22377798736271898	    4
+--5	0.08999485250171871	    5
+-- percentage for each bucket 1 - 0 to 5 , 2 - 5 to 10, 3 - 10 to 15 , 4 - 15 to 20 , 5 > 20
+
+-- 3. Which month has a greater average ‘speed’ - November or December? 
+-- Note that the variable ‘speed’ will have to be derived from other metrics. Hint: You have columns for distance and time.
+
+SELECT avg(trip_distance/(((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))) as speed,
+pickyymm from arpan_ny_taxi_part_orc group by pickyymm order by speed;
+
+-- 	speed 	            pickyymm
+--1	11.000849986772108	201711
+--2	11.095179632494483	201712
+
+SELECT avg(trip_distance/(((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))) as speed,
+dropyymm from arpan_ny_taxi_part_orc group by dropyymm order by speed;
+
+-- 	speed               dropyymm
+--1	11.000676928466273	201711
+--2	11.095308317670726	201712
+
+-- Average speed of November is slightly less than december.
+
+--4. Analyse the average speed of the most happening days of the year, 
+--i.e. 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average. 
+SELECT avg(trip_distance/(((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))) as speed
+from arpan_ny_taxi_part_orc where (day(tpep_pickup_datetime) = 25 or day(tpep_pickup_datetime) = 31) and  pickyymm = 201712;
+--average is 14.03 on most happening days.
+SELECT avg(trip_distance/(((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))) as speed
+from arpan_ny_taxi_part_orc;
+-- overall average is 11.048
+-- This means in most happening days the speed is higher than overall speed. 
+
+------------------------end of analysis --------------------------------------
+	 

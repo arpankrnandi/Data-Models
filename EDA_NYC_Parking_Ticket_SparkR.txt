@@ -1,0 +1,378 @@
+#INITIATE R session
+spark_path <- '/usr/local/spark'
+if (nchar(Sys.getenv("SPARK_HOME")) < 1) {
+  Sys.setenv(SPARK_HOME = spark_path)
+}
+
+library(SparkR, lib.loc = c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib")))
+
+sparkR.session(master = "yarn", sparkConfig = list(spark.driver.memory = "1g"))
+
+# Before executing any hive-sql query from RStudio, you need to add a jar file in RStudio 
+sql("ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar")
+
+#read data into dataframe from csv
+
+df <- read.df("/common_folder/nyc_parking/Parking_Violations_Issued_-_Fiscal_Year_2017.csv", source = "csv", 
+              inferSchema = "true", header = "true",na.strings="NA")
+
+#create table view for analysis 
+head(df)
+str(df)
+nrow(df)
+createOrReplaceTempView(df, "df_tab")
+#total number of tickets 10803028
+count_total <- SparkR::sql("SELECT distinct(`Summons Number`) FROM df_tab")
+count_total
+nrow(count_total)
+#total number of row are 10803028
+##################################################DATA QUALITY CHECK##################
+nrow(filter(df,  isNaN(df$`Summons Number`) | isnan(df$`Summons Number`)))
+nrow(filter(df,  isNaN(df$`Plate ID`) | isnan(df$`Plate ID`)))
+nrow(filter(df,  isNaN(df$`Registration State`) | isnan(df$`Registration State`) ))              
+nrow(filter(df,  isNull(df$`Issue Date`)))
+nrow(filter(df,  isNaN(df$`Violation Code`) | isnan(df$`Violation Code`)))
+nrow(filter(df,  isNaN(df$`Vehicle Body Type`) | isnan(df$`Vehicle Body Type`)))
+nrow(filter(df,  isNaN(df$`Vehicle Make`) | isnan(df$`Vehicle Make`) ))
+nrow(filter(df,  isNaN(df$`Violation Precinct`) | isnan(df$`Violation Precinct`) ))
+nrow(filter(df,  isNaN(df$`Issuer Precinct`) | isnan(df$`Issuer Precinct`) ))
+nrow(filter(df,  isNaN(df$`Violation Time`) | is.nan(df$`Violation Time`)))
+
+########getting distinct values 
+distVals1 <- collect(distinct(select(df, df$`Registration State`)))
+distVals1
+#99 state present issues present. Need to be corrected 
+datagrp <- collect(count(groupBy(df,df$`Registration State`)))
+#NY has maximum no of tickets. Replacing 99 with NY
+df$`Registration State` <- ifelse(df$`Registration State` == "99", "NY", df$`Registration State`)
+#check unique after replace 
+distVals1 <- collect(distinct(select(df, df$`Registration State`)))
+#99 values are gone 66 states present now. 
+distVals2 <- collect(distinct(select(df, df$`Violation Code`)))
+#0-99 codes are present. We are good here 
+
+####checking nan values 
+invalid_data <- filter(df, df$`Plate ID` == 'nan' | df$`Registration State` == 'nan' | df$`Vehicle Body Type` == 'nan' 
+                       | df$`Vehicle Make` == 'nan' | df$`Violation Time` == 'nan' )
+nrow(invalid_data)
+xxx <- collect(invalid_data)
+str(xxx)
+##there are more than 100,000 records found
+###############removing nan with max frequency value 
+datagrp1 <- collect(count(groupBy(df,df$`Vehicle Body Type`)))
+#Trying to find Vehicle Body Type involved in maximum violations 
+datagrp1 <- datagrp1[order(datagrp1$count, decreasing = T), ]
+datagrp1
+#SUBN has maximum frequency 3719802
+#replacing nan with SUBN
+#SUBN has maximum no of tickets. Replacing nan with SUBN
+df$`Vehicle Body Type` <- ifelse(df$`Vehicle Body Type` == "nan", "SUBN", df$`Vehicle Body Type`)
+#VEHICLE MAKE
+datagrp1 <- collect(count(groupBy(df,df$`Vehicle Make`)))
+#Trying to find Vehicle Make involved in maximum violations 
+datagrp1 <- datagrp1[order(datagrp1$count, decreasing = T), ]
+datagrp1
+#FORD has maximum frequency 1280958
+#replacing nan with FORD
+#FORD has maximum no of tickets. Replacing nan with FORD
+df$`Vehicle Make` <- ifelse(df$`Vehicle Make` == "nan", "FORD", df$`Vehicle Make`)
+#plate id. removing nan plate id rows 
+df_cln <- filter(df, df$`Plate ID` !='nan')  
+df_cln_1 <- filter(df_cln, df_cln$`Violation Time` !='nan') 
+
+#check row count after ceanup
+nrow(df_cln_1)
+#10802237
+#CROSS CHECK how many nan present 
+invalid_data <- filter(df_cln_1, df_cln_1$`Plate ID` == 'nan' | df_cln_1$`Registration State` == 'nan' | df_cln_1$`Vehicle Body Type` == 'nan' 
+                       | df_cln_1$`Vehicle Make` == 'nan' | df_cln_1$`Violation Time` == 'nan' )
+nrow(invalid_data)
+#no nan value present
+
+### formatting time 
+## split time into numeric and ampm part. This is to convert 24hrs time
+df_cln_1$time <- substr(df_cln_1$`Violation Time`,1,4)
+df_cln_1$ampm <- substr(df_cln_1$`Violation Time`,5,5)
+df_cln_1$hour <- substr(df_cln_1$`Violation Time`,1,2)
+df_cln_1$time <- cast(df_cln_1$time,"integer")
+df_cln_1$hour <- cast(df_cln_1$hour,"integer")
+
+df_cln_1$time24hrs <- ifelse(df_cln_1$ampm == "P", ifelse(df_cln_1$hour >= 12,df_cln_1$time,df_cln_1$time + 1200), ifelse(df_cln_1$hour >= 12,df_cln_1$time - 1200,df_cln_1$time))
+
+
+df_cln_1$hour24 <- substr(df_cln_1$time24hrs,1,2)
+df_cln_1$hour24 <- cast(df_cln_1$hour24,"integer")
+
+a1 <- collect(distinct(select(df_cln_1, df_cln_1$ampm)))
+
+#conversion validation
+y <- filter(df_cln_1, df_cln_1$ampm != 'A' & df_cln_1$ampm != 'P')
+nrow(y)
+head(y,25)
+nrow(df_cln_1)
+#before cleaning 10802237 
+#There are rows for which the time is not in correct format. this is creating problem in time conversion
+#as reported by above query reported row is only 22 we are removing these.
+df_cln_1 <- filter(df_cln_1, df_cln_1$ampm == 'A' | df_cln_1$ampm == 'P')
+nrow(df_cln_1)
+#after  cleaning 10802215  --> 22 row deleted 
+a1 <- collect(distinct(select(df_cln_1, df_cln_1$hour)))
+a1
+## remove rows that have incorrect time
+df_cln_2 <- filter(df_cln_1, df_cln_1$hour >= 0 & df_cln_1$hour <= 24) 
+nrow(df_cln_2)
+#number of row in final dataset for analysis 10802115 - 100 rows deleted
+
+#Keeping only 2017 data for analysis 
+df_cln_final <- filter(df_cln_2, year(df_cln_2$`Issue Date`) == '2017')
+
+nrow(df_cln_final)
+#5431600
+#preparing table view
+createOrReplaceTempView(df_cln_final, "df_final_tab")
+######################################Analysis starts here #################
+##1. 
+#How often does each violation code occur? Display the frequency of the top five violation codes.
+viocode <- SparkR::sql("SELECT `Violation Code` , COUNT(*) as cnt FROM df_final_tab GROUP BY `Violation Code` order by cnt desc")
+head(viocode, 05)
+##below are the top 5 violation code and their frequency
+##       Violation Code     cnt 
+#1             21           768055
+#2             36           662765
+#3             38           542077
+#4             14           476657
+#5             20           319633
+
+##2.
+#How often does each 'vehicle body type' get a parking ticket? How about the 'vehicle make'? 
+#Vehicle Body Type 
+agr1 <- SparkR::sql("SELECT `Vehicle Body Type` , COUNT(*) as cnt FROM df_final_tab GROUP BY `Vehicle Body Type` order by cnt desc")
+head(agr1,05)
+#below are the Vehicle Body Type which in top 5 list of parking violation
+#   Vehicle Body Type     cnt                                                     
+#1              SUBN 1904045
+#2              4DSD 1547198
+#3               VAN  724014
+#4              DELV  358978
+#5               SDN  194170
+#Vehicle Make
+agr2 <- SparkR::sql("SELECT `Vehicle Make` , COUNT(*) as cnt FROM df_final_tab GROUP BY `Vehicle Make` order by cnt desc")
+head(agr2,05)
+#below are the Vehicle Make which in top 5 list of parking violation
+#   Vehicle Make    cnt                                                           
+#1         FORD 675333
+#2        TOYOT 605256
+#3        HONDA 538822
+#4        NISSA 461972
+#5        CHEVR 356023
+
+##3.
+#A precinct is a police station that has a certain zone of the city under its command. 
+#Find the (5 highest) frequency of tickets for each of the following:
+
+#'Violation Precinct' (this is the precinct of the zone where the violation occurred). 
+#'Using this, can you make any insights for parking violations in any specific areas of the city? 
+#analysis on Violation Precinct
+agr3 <- SparkR::sql("SELECT `Violation Precinct` , COUNT(*) as cnt FROM df_final_tab GROUP BY `Violation Precinct` order by cnt desc")
+head(agr3,6)
+#top 6 
+#     Violation Precinct    cnt                                                   
+#1                    0 925580
+#2                   19 274444
+#3                   14 203552
+#4                    1 174701
+#5                   18 169129
+#6                  114 147443
+# Since violation precinct 0 is invalid top 5 precincts are listed below
+#1                   19 274444
+#2                   14 203552
+#3                    1 174701
+#4                   18 169129
+#5                  114 147443
+#'Issuer Precinct' (this is the precinct that issued the ticket)
+#Here you would have noticed that the dataframe has 'Violating Precinct' or 'Issuing Precinct' as '0'. 
+#These are the erroneous entries. Hence, provide the record for five correct precincts. (Hint: Print top six entries after sorting)
+agr4 <- SparkR::sql("SELECT `Issuer Precinct` , COUNT(*) as cnt FROM df_final_tab GROUP BY `Issuer Precinct` order by cnt desc")
+head(agr4,6)
+#analysis on Issuer Precinct
+#   Issuer Precinct     cnt                                                      
+#1                0 1078370
+#2               19  266961
+#3               14  200494
+#4                1  168740
+#5               18  162993
+#6              114  144054
+# top three Precinct are 19 , 14 , 1
+##4.
+#Find the violation code frequency across three precincts which have issued the most number of tickets 
+#- do these precinct zones have an exceptionally high frequency of certain violation codes? 
+#Are these codes common across precincts? 
+# We can see violation codes 46 and 14 appear to be most common. Yes these codes are common among precincts.
+agr6 <- SparkR::sql("SELECT `Violation Code`,`Issuer Precinct` , COUNT(*) as cnt FROM df_final_tab 
+                    where  `Issuer Precinct` in (14,19,1) GROUP BY `Violation Code`,`Issuer Precinct` order by cnt desc, `Issuer Precinct` asc")
+agr6_frm <- collect(agr6)
+
+agr6_frm
+
+##5.
+#Youâ??d want to find out the properties of parking violations across different times of the day:
+#Divide 24 hours into six equal discrete bins of time. The intervals you choose are at your discretion. 
+#For each of these groups, find the three most commonly occurring violations.
+
+bins <- SparkR::sql("SELECT `Violation Code`,`Registration State`,`Issue Date`,`Vehicle Body Type`,`Vehicle Make`,
+                    `Violation Precinct`,`Issuer Precinct`,`Violation Time`,  \
+                    CASE  WHEN time24hrs <= 0400  THEN 1\
+                    WHEN (time24hrs > 0400  and time24hrs <= 0800) THEN 2\
+                    WHEN (time24hrs > 0800  and time24hrs <= 1200) THEN 3\
+                    WHEN (time24hrs > 1200  and time24hrs <= 1600) THEN 4\
+                    WHEN (time24hrs > 1600  and time24hrs <= 2000) THEN 5\
+                    WHEN (time24hrs > 2000  and time24hrs <= 2359) THEN 6\
+                    ELSE 99 END  as bin_number FROM df_final_tab")
+#create table view 
+createOrReplaceTempView(bins, "bins_tab")
+#check each bin
+a1 <- SparkR::sql("SELECT bin_number ,count(*) from bins_tab group by bin_number")
+head(a1,10)
+#   bin_number count(1)                                                           
+#1          1   165104
+#2          6   175413
+#3          3  2169796
+#4          5   633483
+#5          4  1834672
+#6          2   453114
+#7         99       18
+#there are 18 rows which have incorrect date format
+A <- SparkR::sql("SELECT * from bins_tab where bin_number = 99")
+head(A,20)     
+#Violation Code Registration State Issue Date Vehicle Body Type Vehicle Make Violation Precinct Issuer Precinct Violation Time bin_number
+#1              21                 NY 2017-06-16               SDN        CHEVR                 83               0          110+A         99
+#2              21                 NJ 2017-03-02              SUBN        ROVER                 67               0          093+A         99
+#3              70                 NY 2017-03-04               SDN        NISSA                 70              70          075/P         99
+#4              21                 FL 2017-03-09              SUBN          KIA                  6               0          073/A         99
+#5              21                 NJ 2017-06-13               VAN        DODGE                 25               0          09+1A         99
+#6              50                 NY 2017-05-27              SUBN         JEEP                104             104          06+0P         99
+#7              21                 NY 2017-03-24              SUBN        ME/BE                 49               0          065+A         99
+#8              46                 NY 2017-02-02              TRAC        ME/BE                 34              34          074/A         99
+#9              46                 NY 2017-02-17               VAN        DODGE                 17             401          10+1A         99
+#10             17                 NY 2017-06-02              SUBN        NISSA                 19               0          125+A         99
+#11             46                 NY 2017-04-11               P-U         FORD                 30              30          093+A         99
+#12             14                 NY 2017-02-13               VAN        FRUEH                 18             420          09+2A         99
+#13             21                 NY 2017-04-24               SDN        VOLKS                 60               0          08+7A         99
+#14             21                 FL 2017-04-24               SDN        LEXUS                 78               0          081*A         99
+#15             63                 NY 2017-03-09              SUBN        DODGE                109               3          103/P         99
+#16             46                 NY 2017-01-12               P-U        CHEVR                 70              70          094/P         99
+#17             21                 NY 2017-03-20               SDN        SUBAR                 68               0          121/P         99
+#18             21                 NY 2017-05-23              SUBN        ROVER                 33               0          115+A         99
+
+#cleaning these 18 rows
+nrow(bins)
+#count 5431600
+bins_cleaned <- filter(bins, bins$bin_number != 99) 
+nrow(bins_cleaned)
+#count 5431582
+
+#load in table view 
+createOrReplaceTempView(bins_cleaned, "bins_cleaned_tab")
+
+agr6 <- SparkR::sql("SELECT `Violation Code`, bin_number, COUNT(*) as cnt FROM bins_cleaned_tab
+                    where  `Violation Code` in (21,36,38) GROUP BY `Violation Code`,bin_number order by cnt desc")
+nrow(agr6)
+agr6_c <- collect(agr6)
+agr6_c
+#21, 36 and 38 are the three most common violations occurring for all these bins.
+
+##6
+#Letâ??s try and find some seasonality in this data
+#First, divide the year into some number of seasons, and find frequencies of tickets for each season. 
+#lets split the year 2017 in 4 quarter.
+bins_season <- SparkR::sql("SELECT `Violation Code`,`Registration State`,`Issue Date`,`Vehicle Body Type`,`Vehicle Make`,
+                           `Violation Precinct`,`Issuer Precinct`,`Violation Time`,bin_number,  \
+                           CASE  WHEN month(`Issue Date`) in (1,2,3)  THEN 1\
+                           WHEN (month(`Issue Date`) in (4,5,6)) THEN 2\
+                           WHEN (month(`Issue Date`) in (7,8,9)) THEN 3\
+                           WHEN (month(`Issue Date`) in (10,11,12)) THEN 4\
+                           ELSE 99 END  as bin_season FROM bins_cleaned_tab")
+
+createOrReplaceTempView(bins_season, "bins_season_tab")
+b <- SparkR::sql("SELECT * from bins_season_tab where bin_season = 99")
+nrow(b)
+#no 99 bins so the bin conversion is good 
+
+#Then, find the three most common violations for each of these seasons.
+#season 1 - quarter 1
+agr8 <- SparkR::sql("SELECT `Violation Code` , count (*) as cnt from bins_season_tab where bin_season = 1 group by  `Violation Code` order by cnt desc")
+head(agr8,3)
+#   Violation Code    cnt                                                        
+#1              21 373857
+#2              36 348240
+#3              38 286999
+#season 2 - quarter 2
+agr9 <- SparkR::sql("SELECT `Violation Code` , count (*) as cnt from bins_season_tab where bin_season = 2 group by  `Violation Code` order by cnt desc")
+head(agr9,3)
+#   Violation Code    cnt                                                         
+#1             21 393859
+#2             36 314525
+#3             38 255063
+#season 3 - quarter 3
+agr10 <- SparkR::sql("SELECT `Violation Code` , count (*) as cnt from bins_season_tab where bin_season = 3 group by  `Violation Code` order by cnt desc")
+head(agr10,3)
+# Violation Code cnt                                                            
+#1             21 228
+#2             46 219
+#3             40 109
+#season 4 - quarter 4
+agr11 <- SparkR::sql("SELECT `Violation Code` , count (*) as cnt from bins_season_tab where bin_season = 4 group by  `Violation Code` order by cnt desc")
+head(agr11,3)
+#   Violation Code cnt                                                            
+#1             46 219
+#2             40 121
+#3             21 100
+
+#first two quarter has large number of tickets but in last two quarter there are less no. of tickets. 
+#violation code 21 is common across all seasons. However first half of the year has additional 
+#common violation codes 36 and 38 while later half of year has additional violation codes as 46 and 40.
+
+##7
+#The fines collected from all the parking violation constitute a revenue source for the NYC police department. 
+#Letâ??s take an example of estimating that for the three most commonly occurring codes.
+agr12 <- SparkR::sql("SELECT `Violation Code` , count (*) as cnt from bins_season_tab group by  `Violation Code` order by cnt desc")
+head(agr12,3)
+#  Violation Code    cnt                                                         
+#1             21 768046
+#2             36 662765
+#3             38 542077
+
+##rate for  "21" is (65 + 45)/2 = $55 
+##          "36" is (50 + 50)/2 = $50
+##          "38" is (65 + 35)/2 = $50
+
+#Using this information, find the total amount collected for the three violation codes with maximum tickets. 
+total <- (55 * 768046) + (50 * 662765) + (50 *542077)
+total
+#$102484630
+#State the code which has the highest total collection.
+# Violation code 21 has the highest total collection.
+#What can you intuitively infer from these findings?
+agr13 <- SparkR::sql("SELECT `Registration State` , count (*) as cnt from bins_season_tab where `Violation Code` = 21 group by `Registration State` order by cnt desc")
+head(agr13,3)
+#NY has total 581512 tickets with violation code 21. This is maximum
+agr14 <- SparkR::sql("SELECT `Registration State` , count (*) as cnt from bins_season_tab where `Violation Code` = 36 group by `Registration State` order by cnt desc")
+head(agr14,3)
+#NY has total 568990 tickets with violation code 36. This is maximum
+agr14 <- SparkR::sql("SELECT `Registration State` , count (*) as cnt from bins_season_tab where `Violation Code` = 38 group by `Registration State` order by cnt desc")
+head(agr14,3)
+#NY has total 433030 tickets with violation code 38. This is maximum
+#check in total of the most frequent violation code
+agr15 <- SparkR::sql("SELECT `Registration State` , count (*) as cnt from bins_season_tab where `Violation Code` IN (21,36,38)
+                     group by `Registration State` order by cnt desc")
+head(agr15,3)
+#MAXIMUM TICKETS assigned to NY 
+#  Registration State     cnt                                                    
+#1                 NY 1583532
+#2                 NJ  131423
+#3                 PA   59392
+#REVENUE gained 
+(581512 * 55) + (568990 * 50) + (433030 * 50)
+# $ 82084160
+(82084160/102484630)*100
+# 80% of top 3 most frequent violation code ticket revenue is earned by new york state. 
